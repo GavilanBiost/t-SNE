@@ -1,0 +1,136 @@
+---
+title: "Tutorial t-SNE en R: buenas prácticas"
+author: "Jesús F García Gavilán"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Paquetes:
+
+Rtsne: implementación eficiente de t-SNE (con aproximación Barnes-Hut) ggplot2: visualización
+
+```{r}
+paquetes = c("Rtsne", "ggplot2")
+nuevos = paquetes[!(paquetes %in% installed.packages()[, "Package"])]
+if (length(nuevos)) install.packages(nuevos)
+
+library(Rtsne)
+library(ggplot2)
+```
+
+# 2. Reproducibilidad
+
+La semilla se fija ANTES de cualquier paso estocástico (t-SNE inicializa las posiciones de forma aleatoria, así que esto es imprescindible)
+
+```{r}
+set.seed(123)
+```
+
+# 3. Datos
+
+Simulamos un dataset con estructura de clústeres conocida, para poder comprobar después si t-SNE recupera esa estructura. En un caso real, esto sería vuestra matriz de muestras x variables (genes, metabolitos,biomarcadores...)
+
+```{r}
+n_por_grupo = 100
+n_variables = 50
+
+grupo_a = matrix(rnorm(n_por_grupo * n_variables, mean = 0), 
+                  nrow = n_por_grupo)
+grupo_b = matrix(rnorm(n_por_grupo * n_variables, mean = 3), 
+                  nrow = n_por_grupo)
+grupo_c = matrix(rnorm(n_por_grupo * n_variables, mean = -3, sd = 2),
+                  nrow = n_por_grupo)
+
+datos = rbind(grupo_a, grupo_b, grupo_c)
+etiquetas = factor(rep(c("Grupo A", "Grupo B", "Grupo C"), 
+                        each = n_por_grupo))
+```
+
+# 4. Preprocesado
+
+## 4.1 Eliminar duplicados exactos (Rtsne falla si los encuentra)
+
+```{r}
+duplicados = duplicated(datos)
+if (any(duplicados)) {
+  datos = datos[!duplicados, ]
+  etiquetas = etiquetas[!duplicados]
+}
+```
+
+## 4.2 Escalar los datos ANTES de pasarlos a Rtsne, como paso independiente
+
+Esto evita confundir "varianza alta porque la variable está en otra escala" con "varianza alta porque hay señal real"
+
+```{r}
+datos_escalados = scale(datos)
+```
+
+# 5. Elegir la perplejidad
+
+Regla práctica: la perplejidad debe ser mucho menor que el número de muestras (como mucho un tercio, normalmente bastante menos). Con n = 300 muestras, probamos varios valores para ver el efecto
+
+```{r}
+perplejidades = c(5, 30, 50)
+
+resultados = list()
+for (p in perplejidades) {
+  resultados[[as.character(p)]] = Rtsne(X = datos_escalados,
+                                         dims = 2,
+                                         perplexity = p,
+                                         theta = 0.5, 
+                                         pca = TRUE,                 
+                                         pca_center = TRUE,
+                                         pca_scale = FALSE,  
+                                         check_duplicates = FALSE, 
+                                         max_iter = 1000,
+                                         verbose = TRUE)
+}
+```
+
+Comentarios para el ajuste: 
+
+* theta --\> aproximación de Barnes-Hut; 0 = exacto (lento), 0.5 = buen compromiso 
+* pca --\> el paper original recomienda una reducción inicial 
+* pca_scale --\> si se escalan los datos previamente, no hace falta 
+* check_duplicates --\> lo mismo, si se hace previamente, no hace falta repetir
+
+# 6. Construir data frames para graficar
+
+```{r}
+construir_df = function(resultado, etiquetas, perplejidad) {
+  data.frame(Dim1 = resultado$Y[, 1],
+             Dim2 = resultado$Y[, 2],
+             Grupo = etiquetas,
+             Perplejidad = paste("Perplejidad =", perplejidad))
+}
+
+df_completo = do.call(rbind, lapply(names(resultados), function(p) {
+  construir_df(resultados[[p]], etiquetas, p)
+}))
+```
+
+# 7. Visualización
+
+```{r}
+ggplot(df_completo, aes(x = Dim1, y = Dim2, color = Grupo)) +
+  geom_point(size = 1.8, alpha = 0.7) +
+  facet_wrap(~ Perplejidad, scales = "free") +
+  theme_minimal(base_size = 13) +
+  labs(title = "t-SNE: efecto de la perplejidad sobre la separación de clústeres",
+       subtitle = "Mismos datos, distinta perplejidad",
+       x = "Dimensión 1", y = "Dimensión 2") +
+  theme(legend.position = "bottom")
+```
+
+# 8. Notas de buenas prácticas (a modo de chuleta):
+
+- Las distancias ENTRE clústeres en el plot no significan nada, solo importa qué cae dentro de cada uno
+- Si necesitáis reproducibilidad exacta, documentad la semilla Y la versión del paquete Rtsne (la implementación ha cambiado entre versiones)
+- Probad siempre más de un valor de perplejidad antes de quedaros con una conclusión visual; un único gráfico puede engañar
+- t-SNE es para explorar, no para inferir. No uséis las coordenadas resultantes como input de un modelo predictivo "porque ya están en 2D"
